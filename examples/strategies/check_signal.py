@@ -13,69 +13,70 @@ from typing import List
 from loguru import logger
 from czsc import CZSC, signals, RawBar, Direction
 from czsc.data import TsDataCache, get_symbols
-from czsc.utils import get_sub_elements, single_linear
+from czsc.utils import get_sub_elements, single_linear, fast_slow_cross
 from czsc.objects import Freq, Operate, Signal, Factor, Event, BI
 from czsc.traders import CzscAdvancedTrader
 
 
-# 定义信号函数
+# 【必须】定义信号函数
 # ----------------------------------------------------------------------------------------------------------------------
+def tas_macd_first_bs_V221216(c: CZSC, di: int = 1):
+    """MACD金叉死叉判断第一买卖点
 
+    **信号逻辑：**
 
-def cxt_bi_break_V221126(c: CZSC, di=1) -> OrderedDict:
-    """向上笔突破回调不破信号
+    1. 最近一次交叉为死叉，且前面两次死叉都在零轴下方，价格创新低，那么一买即将出现；一卖反之。
+    2. 或 最近一次交叉为金叉，且前面三次死叉都在零轴下方，价格创新低，那么一买即将出现；一卖反之。
 
     **信号列表：**
 
-    - Signal('15分钟_D1B_向上_突破_5笔_任意_0')
-    - Signal('15分钟_D1B_向上_突破_7笔_任意_0')
-    - Signal('15分钟_D1B_向上_突破_9笔_任意_0')
+    - Signal('15分钟_D1MACD_BS1A_一卖_金叉_任意_0')
+    - Signal('15分钟_D1MACD_BS1A_一卖_死叉_任意_0')
+    - Signal('15分钟_D1MACD_BS1A_一买_死叉_任意_0')
+    - Signal('15分钟_D1MACD_BS1A_一买_金叉_任意_0')
 
-    :param c: CZSC 对象
-    :param di: CZSC 对象
-    :return: 信号字典
+    :param c: CZSC对象
+    :param di: 倒数第i根K线
+    :return: 信号识别结果
     """
+    k1, k2, k3 = f"{c.freq.value}_D{di}MACD_BS1A".split('_')
+    bars = get_sub_elements(c.bars_raw, di=di, n=350)[50:]
 
-    def __check(bis: List[BI]):
-        res = {"match": False, "v1": "突破", "v2": f"{len(bis)}笔", 'v3': "任意"}
-        if len(bis) % 2 != 1 or bis[-1].direction == Direction.Up or bis[0].direction != bis[-1].direction:
-            return res
+    v1 = "其他"
+    v2 = "任意"
+    if len(bars) >= 100:
+        dif = [x.cache['MACD']['dif'] for x in bars]
+        dea = [x.cache['MACD']['dea'] for x in bars]
+        macd = [x.cache['MACD']['macd'] for x in bars]
+        n_bars = bars[-10:]
+        m_bars = bars[-100: -10]
+        high_n = max([x.high for x in n_bars])
+        low_n = min([x.low for x in n_bars])
+        high_m = max([x.high for x in m_bars])
+        low_m = min([x.low for x in m_bars])
 
-        # 获取向上突破的笔列表
-        key_bis = []
-        for i in range(0, len(bis) - 2, 2):
-            if i == 0:
-                key_bis.append(bis[i])
-            else:
-                b1, _, b3 = bis[i - 2:i + 1]
-                if b3.high > b1.high:
-                    key_bis.append(b3)
+        cross = fast_slow_cross(dif, dea)
+        up = [x for x in cross if x['类型'] == "金叉" and x['距离'] > 5]
+        dn = [x for x in cross if x['类型'] == "死叉" and x['距离'] > 5]
 
-        # 检查：
-        # 1. 当下笔的最低点在任一向上突破笔的高点上
-        # 2. 当下笔的最低点离笔序列最低点的距离不超过向上突破笔列表均值的1.618倍
-        tb_break = bis[-1].low > min([x.high for x in key_bis])
-        tb_price = bis[-1].low < min([x.low for x in bis]) + 1.618 * np.mean([x.power_price for x in key_bis])
-        if tb_break and tb_price:
-            res['match'] = True
-        return res
+        b1_con1a = len(cross) > 3 and cross[-1]['类型'] == '死叉' and cross[-1]['慢线'] < 0
+        b1_con1b = len(cross) > 3 and cross[-1]['类型'] == '金叉' and dn[-1]['慢线'] < 0
+        b1_con2 = len(dn) > 3 and dn[-2]['慢线'] < 0 and dn[-3]['慢线'] < 0
+        b1_con3 = len(macd) > 10 and macd[-1] > macd[-2]
+        if low_n < low_m and (b1_con1a or b1_con1b) and b1_con2 and b1_con3:
+            v1 = "一买"
 
-    k1, k2, k3 = c.freq.value, f"D{di}B", "向上"
-    v1, v2, v3 = "其他", '任意', '任意'
+        s1_con1a = len(cross) > 3 and cross[-1]['类型'] == '金叉' and cross[-1]['慢线'] > 0
+        s1_con1b = len(cross) > 3 and cross[-1]['类型'] == '死叉' and up[-1]['慢线'] > 0
+        s1_con2 = len(dn) > 3 and up[-2]['慢线'] > 0 and up[-3]['慢线'] > 0
+        s1_con3 = len(macd) > 10 and macd[-1] < macd[-2]
+        if high_n > high_m and (s1_con1a or s1_con1b) and s1_con2 and s1_con3:
+            v1 = "一卖"
 
-    for n in (9, 7, 5):
-        _bis = get_sub_elements(c.bi_list, di=di, n=n)
-        if len(_bis) != n:
-            logger.warning('笔的数量不对，跳过')
-            continue
-
-        _res = __check(_bis)
-        if _res['match']:
-            v1, v2, v3 = _res['v1'], _res['v2'], _res['v3']
-            break
+        v2 = cross[-1]['类型']
 
     s = OrderedDict()
-    signal = Signal(k1=k1, k2=k2, k3=k3, v1=v1, v2=v2, v3=v3)
+    signal = Signal(k1=k1, k2=k2, k3=k3, v1=v1, v2=v2)
     s[signal.key] = signal.value
     return s
 
@@ -87,7 +88,9 @@ def trader_strategy(symbol):
 
     def get_signals(cat: CzscAdvancedTrader) -> OrderedDict:
         s = OrderedDict({"symbol": cat.symbol, "dt": cat.end_dt, "close": cat.latest_price})
-        s.update(cxt_bi_break_V221126(cat.kas['15分钟'], di=1))
+        signals.update_macd_cache(cat.kas['15分钟'])
+
+        s.update(tas_macd_first_bs_V221216(cat.kas['15分钟'], di=1))
         return s
 
     tactic = {
@@ -101,19 +104,33 @@ def trader_strategy(symbol):
 # 定义命令行接口【信号检查】的特定参数
 # ----------------------------------------------------------------------------------------------------------------------
 
-# 初始化 Tushare 数据缓存
-dc = TsDataCache(r"D:\ts_data")
-
 # 信号检查参数设置【可选】
-# check_params = {
-#     "symbol": "000001.SZ#E",    # 交易品种，格式为 {ts_code}#{asset}
-#     "sdt": "20180101",          # 开始时间
-#     "edt": "20220101",          # 结束时间
-# }
-
-
 check_params = {
-    "symbol": "300001.SZ#E",  # 交易品种，格式为 {ts_code}#{asset}
-    "sdt": "20150101",  # 开始时间
-    "edt": "20220101",  # 结束时间
+    "symbol": "000001.SZ#E",    # 交易品种，格式为 {ts_code}#{asset}
+    "sdt": "20180101",          # 开始时间
+    "edt": "20220101",          # 结束时间
 }
+
+
+# 【必须】定义K线数据读取函数，这里是为了方便接入任意数据源的K线行情
+# ----------------------------------------------------------------------------------------------------------------------
+def read_bars(symbol, sdt='20170101', edt='20221001'):
+    """自定义K线数据读取函数，便于接入任意来源的行情数据进行回测一类的分析
+
+    :param symbol: 标的名称
+    :param sdt: 行情开始时间
+    :param edt: 行情介绍时间
+    :return: list of RawBar
+    """
+    adj = 'hfq'
+    freq = '15min'
+    ts_code, asset = symbol.split("#")
+    # 初始化 Tushare 数据缓存
+    dc = TsDataCache(r"D:\ts_data")
+
+    if "min" in freq:
+        bars = dc.pro_bar_minutes(ts_code, sdt, edt, freq=freq, asset=asset, adj=adj, raw_bar=True)
+    else:
+        bars = dc.pro_bar(ts_code, sdt, edt, freq=freq, asset=asset, adj=adj, raw_bar=True)
+    return bars
+

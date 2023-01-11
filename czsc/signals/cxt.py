@@ -8,8 +8,8 @@ describe:  cxt 代表 CZSC 形态信号
 import numpy as np
 from loguru import logger
 from typing import List
-from czsc import CZSC, Signal
-from czsc.objects import FX, BI, Direction
+from czsc import CZSC, Signal, CzscAdvancedTrader
+from czsc.objects import FX, BI, Direction, ZS
 from czsc.utils import get_sub_elements
 from collections import OrderedDict
 
@@ -251,4 +251,102 @@ def cxt_bi_break_V221126(c: CZSC, di=1) -> OrderedDict:
     signal = Signal(k1=k1, k2=k2, k3=k3, v1=v1, v2=v2, v3=v3)
     s[signal.key] = signal.value
     return s
+
+
+def cxt_sub_b3_V221212(cat: CzscAdvancedTrader, freq='60分钟', sub_freq='15分钟', th=10) -> OrderedDict:
+    """小级别突破大级别中枢形成三买，贡献者：魏永超
+
+    **信号逻辑：**
+
+    1. freq级别中产生笔中枢，最后一笔向上时，中枢由之前3笔构成；最后一笔向下时，中枢由最后3笔构成。
+    2. sub_freq级别中出现向上笔超越大级别中枢最高点，且随后的回落，不回到大级别中枢区间的th%以内。
+
+    **信号列表：**
+
+    - Signal('60分钟_15分钟_3买回踩10_确认_任意_任意_0')
+
+    :param cat:
+    :param freq: 中枢所在的大级别
+    :param sub_freq: 突破大级别中枢，回踩形成小级别类3买的小级别
+    :param th: 小级别回落对大级别中枢区间的回踩程度，0表示回踩不进大级别中枢，10表示回踩不超过中枢区间的10%
+    :return: 信号识别结果
+    """
+    k1, k2, k3 = f"{freq}_{sub_freq}_三买回踩{th}".split('_')
+
+    c: CZSC = cat.kas[freq]
+    sub_c: CZSC = cat.kas[sub_freq]
+
+    v1 = "其他"
+    if len(c.bi_list) > 13 and len(sub_c.bi_list) > 10:
+        last_bi = c.bi_list[-1]
+        if last_bi.direction == Direction.Down:
+            zs = ZS(symbol=cat.symbol, bis=c.bi_list[-3:])
+        else:
+            zs = ZS(symbol=cat.symbol, bis=c.bi_list[-4:-1])
+
+        min7 = min([x.low for x in c.bi_list[-7:]])
+        # 中枢成立，且中枢最低点不是最后7笔的最低点，且最后7笔最低点同时也是最后13笔最低点（保证低点起来第一个中枢）
+        if zs.zd < zs.zg and zs.dd > min7 == min([x.low for x in c.bi_list[-13:]]):
+            last_sub_bi = sub_c.bi_list[-1]
+
+            if last_sub_bi.direction == Direction.Down and last_sub_bi.high > zs.gg \
+                    and last_sub_bi.low > zs.zg - (th / 100) * (zs.zg - zs.zd):
+                v1 = "确认"
+
+    s = OrderedDict()
+    signal = Signal(k1=k1, k2=k2, k3=k3, v1=v1)
+    s[signal.key] = signal.value
+    return s
+
+
+def cxt_zhong_shu_gong_zhen_V221221(cat: CzscAdvancedTrader, freq1='日线', freq2='60分钟') -> OrderedDict:
+    """大小级别中枢共振，类二买共振；贡献者：琅盎
+
+    **信号逻辑：**
+
+    1. 不区分上涨或下跌中枢
+    2. 次级别中枢 DD 大于本级别中枢中轴
+    3. 次级别向下笔出底分型开多；反之看空
+
+    **信号列表：**
+
+    - Signal('日线_60分钟_中枢共振_看多_任意_任意_0')
+    - Signal('日线_60分钟_中枢共振_看空_任意_任意_0')
+
+    :param cat:
+    :param freq1:大级别周期
+    :param freq2: 小级别周期
+    :return: 信号识别结果
+    """
+    k1, k2, k3 = f"{freq1}_{freq2}_中枢共振".split('_')
+
+    max_freq: CZSC = cat.kas[freq1]
+    min_freq: CZSC = cat.kas[freq2]
+    symbol = cat.symbol
+
+    def __is_zs(_bis):
+        _zs = ZS(symbol=symbol, bis=_bis)
+        if _zs.zd < _zs.zg:
+            return True
+        else:
+            return False
+
+    v1 = "其他"
+    if len(max_freq.bi_list) >= 5 and __is_zs(max_freq.bi_list[-3:]) \
+            and len(min_freq.bi_list) >= 5 and __is_zs(min_freq.bi_list[-3:]):
+
+        big_zs = ZS(symbol=symbol, bis=max_freq.bi_list[-3:])
+        small_zs = ZS(symbol=symbol, bis=min_freq.bi_list[-3:])
+
+        if small_zs.dd > big_zs.zz and min_freq.bi_list[-1].direction == Direction.Down:
+            v1 = "看多"
+
+        if small_zs.gg < big_zs.zz and min_freq.bi_list[-1].direction == Direction.Up:
+            v1 = "看空"
+
+    s = OrderedDict()
+    signal = Signal(k1=k1, k2=k2, k3=k3, v1=v1)
+    s[signal.key] = signal.value
+    return s
+
 
